@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         Maxipizza · GoPOS Live Orders
 // @namespace    https://maxipizza.pl/gopos-live-orders
-// @version      0.5.0
+// @version      0.5.1
 // @description  Pokazuje numer kuchenny zamówienia pod awatarem źródła na kartach Live Orders w GoPOS
 // @author       Maxipizza
 // @match        https://app.gopos.io/*
 // @run-at       document-idle
 // @noframes
-// @updateURL    https://maxipizza.github.io/gopos-live-orders/maxipizza-live-orders.user.js
-// @downloadURL  https://maxipizza.github.io/gopos-live-orders/maxipizza-live-orders.user.js
-// @connect      maxipizza.github.io
+// @updateURL    https://maxipizzasa.github.io/gopos-live-orders/maxipizza-live-orders.user.js
+// @downloadURL  https://maxipizzasa.github.io/gopos-live-orders/maxipizza-live-orders.user.js
+// @connect      maxipizzasa.github.io
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -39,9 +39,9 @@
  *     page, so the script matches the whole app, attaches its observer once, and does nothing
  *     until live-order cards show up in the DOM.
  *
- * Distribution: this file is served from GitHub Pages (https://maxipizza.github.io/gopos-live-orders/); Tampermonkey
+ * Distribution: this file is served from GitHub Pages (https://maxipizzasa.github.io/gopos-live-orders/); Tampermonkey
  * follows @updateURL and installs a new version on its own whenever @version grows.
- * Remote control: https://maxipizza.github.io/gopos-live-orders/config.json is polled once a minute (cache-busted):
+ * Remote control: https://maxipizzasa.github.io/gopos-live-orders/config.json is polled once a minute (cache-busted):
  *   { "enabled": true, "avatarSize": 44, "numberSize": 22 }
  * enabled=false removes everything the script drew and pauses it on every machine within a minute;
  * the two sizes let the look be tuned without shipping a new version. Fetch failures keep the last
@@ -57,7 +57,7 @@
   const CARD_SELECTOR = '.live-orders-list-item';
   const RIGHT_BOX_SELECTOR = '.live-orders-list-item-right-box';
   const LEFT_BOX_SELECTOR = '.live-orders-list-item-left-box';   // best guess, optional
-  const CONFIG_URL = 'https://maxipizza.github.io/gopos-live-orders/config.json';
+  const CONFIG_URL = 'https://maxipizzasa.github.io/gopos-live-orders/config.json';
   const CONFIG_POLL_MS = 60000;
   const GAP = 6;
 

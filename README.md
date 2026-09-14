@@ -10,7 +10,7 @@ makes no requests of its own apart from its remote config.
 | `maxipizza-live-orders.user.js` | the script; install URL and auto-update source |
 | `config.json` | remote control: `enabled` (kill switch), `avatarSize`, `numberSize` |
 
-Served from GitHub Pages: <https://maxipizza.github.io/gopos-live-orders/>
+Served from GitHub Pages: <https://maxipizzasa.github.io/gopos-live-orders/>
 
 ## Instalacja na komputerze (Chrome, Windows / macOS)
 
@@ -18,7 +18,7 @@ Served from GitHub Pages: <https://maxipizza.github.io/gopos-live-orders/>
 2. `chrome://extensions` → Tampermonkey → **Szczegóły** → włącz **Zezwalaj na skrypty użytkownika**
    (Chrome 138+; w starszym Chrome włącz **Tryb dewelopera** na `chrome://extensions`).
 3. Otwórz w tej samej przeglądarce:
-   **<https://maxipizza.github.io/gopos-live-orders/maxipizza-live-orders.user.js>**
+   **<https://maxipizzasa.github.io/gopos-live-orders/maxipizza-live-orders.user.js>**
    i kliknij **Zainstaluj** w oknie Tampermonkey.
 4. Otwórz GoPOS → Live Orders. Pod kółkiem źródła każdego zamówienia pojawia się numer kuchenny;
    `—` oznacza zamówienie bez numeru.
