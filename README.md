@@ -47,6 +47,22 @@ and pauses the script within about a minute; setting it back to `true` restores 
 (24–80) and `numberSize` (12–48) restyle the cards live, without a new script version. If the file is
 unreachable the script keeps its last state.
 
+## Order age colors
+
+Each card's border/background is colored by how long ago the order was created, using per-org
+thresholds from `https://api.maxipizza.org/public/{orgId}/order-preparation-time/` (org id read from
+the URL, e.g. `2876` in `/2876/live_orders/list`), polled once a minute:
+
+```json
+{ "statusGreenMinutes": 15, "statusOrangeMinutes": 30, "statusRedMinutes": 45, "delayedOrderQueueThresholdMinutes": 60 }
+```
+
+Green while the order is younger than `statusGreenMinutes`, orange until `statusOrangeMinutes`, red
+from there on (`statusRedMinutes` and `delayedOrderQueueThresholdMinutes` are fetched but not used
+for coloring). Cards with the GoPOS class `external` are never colored. If the endpoint is
+unreachable no card is colored until it first succeeds; after that, fetch failures keep the last
+known thresholds.
+
 ## Debug
 
 Tampermonkey menu → **Maxipizza: debug on/off**, reload. Console, filter `[mxp]`:
@@ -58,4 +74,4 @@ Tampermonkey menu → **Maxipizza: debug on/off**, reload. Console, filter `[mxp
 
 Earlier versions (0.1–0.2) fetched customer history, loyalty and reputation from a dedicated endpoint
 in maxipizza-api; 0.3 went standalone with a footer band; 0.4 moved the number under the avatar; 0.5
-added GitHub Pages distribution and `config.json`.
+added GitHub Pages distribution and `config.json`; 0.6 added per-org order age status colors.

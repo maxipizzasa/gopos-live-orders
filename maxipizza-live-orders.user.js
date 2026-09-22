@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Maxipizza · GoPOS Live Orders
 // @namespace    https://maxipizza.pl/gopos-live-orders
-// @version      0.5.1
+// @version      0.6.1
 // @description  Pokazuje numer kuchenny zamówienia pod awatarem źródła na kartach Live Orders w GoPOS
 // @author       Maxipizza
 // @match        https://app.gopos.io/*
@@ -10,6 +10,7 @@
 // @updateURL    https://maxipizzasa.github.io/gopos-live-orders/maxipizza-live-orders.user.js
 // @downloadURL  https://maxipizzasa.github.io/gopos-live-orders/maxipizza-live-orders.user.js
 // @connect      maxipizzasa.github.io
+// @connect      api.maxipizza.org
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -46,6 +47,16 @@
  * enabled=false removes everything the script drew and pauses it on every machine within a minute;
  * the two sizes let the look be tuned without shipping a new version. Fetch failures keep the last
  * known state (fail-open), so an outage of the config host never blanks the screens.
+ *
+ * Order age status color: the org id is read from the URL (`/{orgId}/...`) and used to poll
+ * `https://dev.maxipizza.org/public/{orgId}/order-preparation-time/` (needs `Accept: application/json`,
+ * the endpoint defaults to XML otherwise) once a minute for
+ *   { "statusGreenMinutes": 15, "statusOrangeMinutes": 30, "statusRedMinutes": 45, "delayedOrderQueueThresholdMinutes": 60 }
+ * Each card's border/background is colored by `now - order.created_at`: green while under
+ * statusGreenMinutes, orange until statusOrangeMinutes, red from there on (statusRedMinutes and
+ * delayedOrderQueueThresholdMinutes are carried but not used for coloring). Cards with the GoPOS
+ * class "external" are left untouched. Fetch failures keep the last known thresholds (fail-open);
+ * before the first successful fetch, no card is colored.
  */
 (function () {
   'use strict';
@@ -55,10 +66,14 @@
   const onLiveOrdersPage = () => /^\/\d+\/live_orders(\/|$)/.test(location.pathname);
 
   const CARD_SELECTOR = '.live-orders-list-item';
+  const TABLE_ITEM_SELECTOR = '.live-orders-table-item';   // one per card, wraps CARD_SELECTOR
+  const STATUS_COLOR_LIMIT = 4;                             // only the first N cards get age colors
   const RIGHT_BOX_SELECTOR = '.live-orders-list-item-right-box';
   const LEFT_BOX_SELECTOR = '.live-orders-list-item-left-box';   // best guess, optional
   const CONFIG_URL = 'https://maxipizzasa.github.io/gopos-live-orders/config.json';
   const CONFIG_POLL_MS = 60000;
+  const PREP_TIME_URL = (orgId) => `https://api.maxipizza.org/public/${orgId}/order-preparation-time/`;
+  const PREP_TIME_POLL_MS = 60000;
   const GAP = 6;
 
   const state = {
@@ -66,8 +81,15 @@
     enabled: true,
     avatarSize: 44,      // GoPOS default is 60; both sizes can be overridden by config.json
     numberSize: 22,
+    prepTime: null,      // { greenMin, orangeMin, redMin, delayedQueueMin } once fetched, else no coloring
   };
   const log = (...args) => { if (state.debug) console.log('[mxp]', ...args); };
+
+  /** Org id from the SPA path, e.g. "2876" from "/2876/live_orders/list". Null off an org route. */
+  function orgIdFromPath() {
+    const m = /^\/(\d+)(\/|$)/.exec(location.pathname);
+    return m ? m[1] : null;
+  }
 
   function toggleDebug() {
     state.debug = !state.debug;
@@ -188,6 +210,12 @@
               font-variant-numeric: tabular-nums; color: #212529; white-space: nowrap; pointer-events: none; }
     .mxp-kn.mxp-none { opacity: .35; }
     .mxp-kn.mxp-abs { position: absolute; transform: translateX(-50%); }
+    .mxp-status-green, .mxp-status-orange, .mxp-status-red {
+      border-width: 1px !important; border-style: solid !important;
+    }
+    .mxp-status-green  { background-color: #eeffee !important; border-color: green !important; }
+    .mxp-status-orange { background-color: #f7f1cd !important; border-color: orange !important; }
+    .mxp-status-red    { background-color: #ffeeee !important; border-color: red !important; }
     `;
     if (!styleEl) styleEl = GM_addStyle(css);
     else styleEl.textContent = css;
@@ -261,7 +289,42 @@
     document.querySelectorAll('.mxp-leftcol').forEach((el) => el.classList.remove('mxp-leftcol'));
     document.querySelectorAll(CARD_SELECTOR).forEach((card) => {
       if (card.dataset.mxpMode) { card.style.minHeight = ''; delete card.dataset.mxpMode; }
+      clearStatusColor(card);
     });
+  }
+
+  // ------------------------------------------------------------------ order age status color
+  const STATUS_CLASSES = ['mxp-status-green', 'mxp-status-orange', 'mxp-status-red'];
+
+  /** 'mxp-status-green'/'orange'/'red' from order age vs state.prepTime, or null (no thresholds yet / bad date). */
+  function statusClassFor(order) {
+    if (!state.prepTime || !order || !order.created_at) return null;
+    const created = new Date(order.created_at).getTime();
+    if (!Number.isFinite(created)) return null;
+    const elapsedMin = (Date.now() - created) / 60000;
+    if (elapsedMin < state.prepTime.greenMin) return 'mxp-status-green';
+    if (elapsedMin < state.prepTime.orangeMin) return 'mxp-status-orange';
+    return 'mxp-status-red';
+  }
+
+  function clearStatusColor(card) {
+    if (!card.dataset.mxpStatus) return;
+    card.classList.remove(...STATUS_CLASSES);
+    delete card.dataset.mxpStatus;
+  }
+
+  /**
+   * Colors the card border/background by order age; skips GoPOS "external" cards entirely, and
+   * cards past `eligible` (only the first STATUS_COLOR_LIMIT `.live-orders-table-item` get colored).
+   */
+  function applyStatusColor(card, order, eligible) {
+    if (!eligible || card.classList.contains('external')) { clearStatusColor(card); return; }
+    const cls = statusClassFor(order);
+    if (!cls) { clearStatusColor(card); return; }
+    if (card.dataset.mxpStatus === cls) return;   // idempotent: no flicker on every poll
+    card.classList.remove(...STATUS_CLASSES);
+    card.classList.add(cls);
+    card.dataset.mxpStatus = cls;
   }
 
   // ------------------------------------------------------------------ remote config
@@ -300,6 +363,36 @@
     });
   }
 
+  function applyPrepTime(data) {
+    if (!data || typeof data !== 'object') return;
+    const { statusGreenMinutes: g, statusOrangeMinutes: o, statusRedMinutes: r, delayedOrderQueueThresholdMinutes: d } = data;
+    if (![g, o, r].every((n) => Number.isFinite(n) && n > 0) || !(g < o)) {
+      log('prep-time rejected (bad thresholds)', data);
+      return;
+    }
+    state.prepTime = { greenMin: g, orangeMin: o, redMin: r, delayedQueueMin: d };
+    log('prep-time updated', state.prepTime);
+    scheduleScan();   // re-color right away, not on the next tick
+  }
+
+  function fetchPrepTime() {
+    const orgId = orgIdFromPath();
+    if (!orgId) return;
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url: PREP_TIME_URL(orgId),
+      headers: { 'Accept': 'application/json' },   // the endpoint serves XML without this header
+      timeout: 10000,
+      onload: (res) => {
+        if (res.status < 200 || res.status >= 300) { log('prep-time http', res.status); return; }
+        try { applyPrepTime(JSON.parse(res.responseText)); }
+        catch (e) { log('prep-time parse failed', e); }
+      },
+      onerror: () => log('prep-time fetch failed'),
+      ontimeout: () => log('prep-time fetch timeout'),
+    });
+  }
+
   // ------------------------------------------------------------------ scan loop
   let loggedMode = false;
   function scan() {
@@ -307,11 +400,16 @@
     if (!onLiveOrdersPage()) return;               // cheap gate: the observer runs on every GoPOS page
     const items = collectCards();
     if (!items.length) return;
+    const coloredWrappers = new Set(
+      Array.prototype.slice.call(document.querySelectorAll(TABLE_ITEM_SELECTOR), 0, STATUS_COLOR_LIMIT)
+    );
     let withNumber = 0, noAvatar = 0;
     for (const { card, order } of items) {
       const kn = kitchenNumberFrom(order);
       if (kn) withNumber++;
       if (!render(card, kn)) noAvatar++;
+      const wrapper = card.closest(TABLE_ITEM_SELECTOR);
+      applyStatusColor(card, order, !wrapper || coloredWrappers.has(wrapper));
     }
     if (!loggedMode && items.length) {
       loggedMode = true;
@@ -352,7 +450,9 @@
   setInterval(scheduleScan, 15000);   // safety net when GoPOS updates state without touching the DOM
   fetchConfig();
   setInterval(fetchConfig, CONFIG_POLL_MS);
+  fetchPrepTime();
+  setInterval(fetchPrepTime, PREP_TIME_POLL_MS);
   scheduleScan();
   if (state.debug) window.__mxpState = state;   // inspection hook, debug mode only
-  log('started', { version: SCRIPT_VERSION, path: location.pathname, liveOrders: onLiveOrdersPage() });
+  log('started', { version: SCRIPT_VERSION, path: location.pathname, liveOrders: onLiveOrdersPage() });3
 })();
