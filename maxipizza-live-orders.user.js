@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Maxipizza · GoPOS Live Orders
 // @namespace    https://maxipizza.pl/gopos-live-orders
-// @version      0.6.1
+// @version      0.7.0
 // @description  Pokazuje numer kuchenny zamówienia pod awatarem źródła na kartach Live Orders w GoPOS
 // @author       Maxipizza
 // @match        https://app.gopos.io/*
@@ -52,11 +52,16 @@
  * `https://dev.maxipizza.org/public/{orgId}/order-preparation-time/` (needs `Accept: application/json`,
  * the endpoint defaults to XML otherwise) once a minute for
  *   { "statusGreenMinutes": 15, "statusOrangeMinutes": 30, "statusRedMinutes": 45, "delayedOrderQueueThresholdMinutes": 60 }
- * Each card's border/background is colored by `now - order.created_at`: green while under
- * statusGreenMinutes, orange until statusOrangeMinutes, red from there on (statusRedMinutes and
- * delayedOrderQueueThresholdMinutes are carried but not used for coloring). Cards with the GoPOS
- * class "external" are left untouched. Fetch failures keep the last known thresholds (fail-open);
- * before the first successful fetch, no card is colored.
+ * Each card's border/background is colored by elapsed minutes since an anchor time: green while
+ * under statusGreenMinutes, orange until statusOrangeMinutes, red from there on (statusRedMinutes
+ * is carried but not used for coloring). The anchor is `order.created_at`, except for "delayed"
+ * orders (scheduled well after they were placed: gap between created_at and
+ * estimated_delivery_at/estimated_preparation_at exceeds DELAYED_ORDER_THRESHOLD_MINUTES) whose
+ * anchor is instead `calculated_delivery_at - delayedOrderQueueThresholdMinutes`, where
+ * calculated_delivery_at is the later of estimated_preparation_at/estimated_delivery_at; such an
+ * order stays uncolored until that anchor time arrives. Cards with the GoPOS class "external" are
+ * left untouched. Fetch failures keep the last known thresholds (fail-open); before the first
+ * successful fetch, no card is colored.
  */
 (function () {
   'use strict';
@@ -68,6 +73,7 @@
   const CARD_SELECTOR = '.live-orders-list-item';
   const TABLE_ITEM_SELECTOR = '.live-orders-table-item';   // one per card, wraps CARD_SELECTOR
   const STATUS_COLOR_LIMIT = 4;                             // only the first N cards get age colors
+  const DELAYED_ORDER_THRESHOLD_MINUTES = 75;               // mirrors backend isDelayed()
   const RIGHT_BOX_SELECTOR = '.live-orders-list-item-right-box';
   const LEFT_BOX_SELECTOR = '.live-orders-list-item-left-box';   // best guess, optional
   const CONFIG_URL = 'https://maxipizzasa.github.io/gopos-live-orders/config.json';
@@ -296,12 +302,48 @@
   // ------------------------------------------------------------------ order age status color
   const STATUS_CLASSES = ['mxp-status-green', 'mxp-status-orange', 'mxp-status-red'];
 
-  /** 'mxp-status-green'/'orange'/'red' from order age vs state.prepTime, or null (no thresholds yet / bad date). */
+  /** Mirrors backend isDelayed(): true when the gap between created_at and the order's estimated
+   *  delivery/preparation time exceeds DELAYED_ORDER_THRESHOLD_MINUTES. */
+  function isOrderDelayed(order) {
+    const created = new Date(order.created_at).getTime();
+    const timeStr = order.estimated_delivery_at || order.estimated_preparation_at;
+    if (!timeStr || !Number.isFinite(created)) return false;
+    const time = new Date(timeStr).getTime();
+    if (!Number.isFinite(time)) return false;
+    return (time - created) / 60000 > DELAYED_ORDER_THRESHOLD_MINUTES;
+  }
+
+  /** Later of estimated_preparation_at / estimated_delivery_at as epoch ms, or null if neither parses. */
+  function calculatedDeliveryAt(order) {
+    const prep = order.estimated_preparation_at ? new Date(order.estimated_preparation_at).getTime() : NaN;
+    const delivery = order.estimated_delivery_at ? new Date(order.estimated_delivery_at).getTime() : NaN;
+    if (!Number.isFinite(prep) && !Number.isFinite(delivery)) return null;
+    if (!Number.isFinite(prep)) return delivery;
+    if (!Number.isFinite(delivery)) return prep;
+    return Math.max(prep, delivery);
+  }
+
+  /** Anchor time (epoch ms) for the age-based status color: created_at, or for a delayed order,
+   *  calculated_delivery_at minus the delayed-queue threshold. Falls back to created_at when the
+   *  threshold or the delivery time isn't available (fail-open). */
+  function statusStartTime(order) {
+    const created = new Date(order.created_at).getTime();
+    if (!isOrderDelayed(order)) return created;
+    const delayedQueueMin = state.prepTime.delayedQueueMin;
+    if (!Number.isFinite(delayedQueueMin) || delayedQueueMin <= 0) return created;
+    const deliveryAt = calculatedDeliveryAt(order);
+    if (deliveryAt == null) return created;
+    return deliveryAt - delayedQueueMin * 60000;
+  }
+
+  /** 'mxp-status-green'/'orange'/'red' from order age vs state.prepTime, or null (no thresholds
+   *  yet / bad date / a delayed order whose anchor time hasn't arrived yet). */
   function statusClassFor(order) {
     if (!state.prepTime || !order || !order.created_at) return null;
-    const created = new Date(order.created_at).getTime();
-    if (!Number.isFinite(created)) return null;
-    const elapsedMin = (Date.now() - created) / 60000;
+    const start = statusStartTime(order);
+    if (!Number.isFinite(start)) return null;
+    const elapsedMin = (Date.now() - start) / 60000;
+    if (elapsedMin < 0) return null;   // delayed order not due for prep yet: stay uncolored
     if (elapsedMin < state.prepTime.greenMin) return 'mxp-status-green';
     if (elapsedMin < state.prepTime.orangeMin) return 'mxp-status-orange';
     return 'mxp-status-red';
