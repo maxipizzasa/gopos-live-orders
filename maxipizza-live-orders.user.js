@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Maxipizza · GoPOS Live Orders
 // @namespace    https://maxipizza.pl/gopos-live-orders
-// @version      0.7.2
+// @version      0.8.1
 // @description  Pokazuje numer kuchenny zamówienia pod awatarem źródła na kartach Live Orders w GoPOS
 // @author       Maxipizza
 // @match        https://app.gopos.io/*
@@ -62,6 +62,11 @@
  * order stays uncolored until that anchor time arrives. Cards with the GoPOS class "external" are
  * left untouched. Fetch failures keep the last known thresholds (fail-open); before the first
  * successful fetch, no card is colored.
+ *
+ * Production-time counter: an "XXX min" clock placed right under the kitchen number, refreshed
+ * client-side every 20s. Uses the exact same anchor time as the status color (`statusStartTime`)
+ * so it always agrees with the border color, just expressed as a running total instead of a
+ * three-way bucket.
  */
 (function () {
   'use strict';
@@ -80,12 +85,13 @@
   const CONFIG_POLL_MS = 60000;
   const PREP_TIME_URL = (orgId) => `https://api.maxipizza.org/public/${orgId}/order-preparation-time/`;
   const PREP_TIME_POLL_MS = 60000;
-  const GAP = 6;
+  const GAP = 2;
+  const PT_FONT_SIZE = 13;   // production-time clock, deliberately smaller/lighter than the kitchen number
 
   const state = {
     debug: !!GM_getValue('debug', false),
     enabled: true,
-    avatarSize: 44,      // GoPOS default is 60; both sizes can be overridden by config.json
+    avatarSize: 28,      // GoPOS default is 60; both sizes can be overridden by config.json
     numberSize: 22,
     prepTime: null,      // { greenMin, orangeMin, redMin, delayedQueueMin } once fetched, else no coloring
   };
@@ -215,7 +221,9 @@
               font-weight: 700; font-size: ${state.numberSize}px; line-height: 1; letter-spacing: .01em;
               font-variant-numeric: tabular-nums; color: #212529; white-space: nowrap; pointer-events: none; }
     .mxp-kn.mxp-none { opacity: .35; }
-    .mxp-kn.mxp-abs { position: absolute; transform: translateX(-50%); }
+    .mxp-pt { font-family: system-ui, sans-serif; font-weight: 600; font-size: ${PT_FONT_SIZE}px; line-height: 1;
+              font-variant-numeric: tabular-nums; color: black; white-space: nowrap; pointer-events: none; }
+    .mxp-abs { position: absolute; transform: translateX(-50%); }
     .mxp-status-green, .mxp-status-orange, .mxp-status-red {
       border-width: 1px !important; border-style: solid !important;
     }
@@ -271,7 +279,52 @@
     return kn;
   }
 
-  function render(card, value) {
+  /**
+   * Creates/positions the production-time clock right after `kn` (same column in layout mode,
+   * measured off `kn`'s own rect in absolute mode). Only handles placement; text content is set
+   * by the caller (render()) and refreshed by tickProductionTimers().
+   */
+  function ensureProductionTime(card, kn) {
+    let pt = card.querySelector('[data-mxp="pt"]');
+    if (!pt) {
+      pt = document.createElement('span');
+      pt.className = 'mxp-pt';
+      pt.dataset.mxp = 'pt';
+    }
+    if (card.dataset.mxpMode === 'layout') {
+      if (pt.previousElementSibling !== kn || pt.parentElement !== kn.parentElement) kn.insertAdjacentElement('afterend', pt);
+      pt.classList.remove('mxp-abs');
+      pt.style.left = pt.style.top = '';
+    } else {
+      if (pt.parentElement !== card) card.appendChild(pt);
+      pt.classList.add('mxp-abs');
+      const cr = card.getBoundingClientRect(), kr = kn.getBoundingClientRect();
+      pt.style.left = Math.round(kr.left - cr.left + kr.width / 2) + 'px';
+      const top = Math.round(kr.bottom - cr.top + GAP);
+      pt.style.top = top + 'px';
+      const cs = getComputedStyle(card);
+      const needed = top + PT_FONT_SIZE + (parseFloat(cs.paddingBottom) || 0);
+      if (needed > cr.height) card.style.minHeight = Math.ceil(needed) + 'px';
+    }
+    return pt;
+  }
+
+  function formatDuration(ms) {
+    const min = Math.max(0, Math.floor(ms / 60000));
+    return min + ' min';
+  }
+
+  /** Ticks every `[data-mxp="pt"]` clock from its stored anchor. Runs on its own interval,
+   *  independent of scan(), so the clock doesn't wait on a DOM mutation to advance. */
+  function tickProductionTimers() {
+    if (!state.enabled) return;
+    document.querySelectorAll('[data-mxp="pt"]').forEach((pt) => {
+      const anchor = Number(pt.dataset.mxpAnchor);
+      pt.textContent = Number.isFinite(anchor) ? formatDuration(Date.now() - anchor) : '';
+    });
+  }
+
+  function render(card, value, ptStart) {
     const avatar = findAvatar(card);
     if (!avatar) return false;
     const kn = ensureNumber(card, avatar);
@@ -282,12 +335,25 @@
       kn.classList.toggle('mxp-none', !value);
       kn.title = value ? 'Numer kuchenny GoPOS' : 'Zamówienie nie ma numeru kuchennego';
     }
+    const pt = ensureProductionTime(card, kn);
+    if (Number.isFinite(ptStart)) {
+      pt.dataset.mxpAnchor = String(ptStart);
+      // Set the text right away too (not just on the next tickProductionTimers pass): when GoPOS
+      // remounts a card, `pt` here is a brand-new element with no text yet, and leaving it to the
+      // ticker alone meant it sat blank for up to a full tick interval - exactly the "disappears
+      // for a moment" flicker.
+      pt.textContent = formatDuration(Date.now() - ptStart);
+      pt.title = 'Czas produkcji zamówienia';
+    } else {
+      delete pt.dataset.mxpAnchor;
+      pt.textContent = '';
+    }
     return true;
   }
 
   /** Undo everything the script did to the page (kill switch). */
   function removeAll() {
-    document.querySelectorAll('[data-mxp="kn"]').forEach((el) => el.remove());
+    document.querySelectorAll('[data-mxp="kn"], [data-mxp="pt"]').forEach((el) => el.remove());
     document.querySelectorAll('.mxp-avatar').forEach((el) => {
       el.classList.remove('mxp-avatar');
       el.style.width = el.style.height = el.style.minWidth = el.style.minHeight = '';
@@ -324,13 +390,14 @@
     return Math.max(prep, delivery);
   }
 
-  /** Anchor time (epoch ms) for the age-based status color: created_at, or for a delayed order,
-   *  calculated_delivery_at minus the delayed-queue threshold. Falls back to created_at when the
-   *  threshold or the delivery time isn't available (fail-open). */
+  /** Anchor time (epoch ms) for order age, shared by the status color and the production-time
+   *  counter: created_at, or for a delayed order, calculated_delivery_at minus the delayed-queue
+   *  threshold. Falls back to created_at when prepTime/the threshold/the delivery time isn't
+   *  available (fail-open). */
   function statusStartTime(order) {
     const created = new Date(order.created_at).getTime();
     if (!isOrderDelayed(order)) return created;
-    const delayedQueueMin = state.prepTime.delayedQueueMin;
+    const delayedQueueMin = state.prepTime ? state.prepTime.delayedQueueMin : null;
     if (!Number.isFinite(delayedQueueMin) || delayedQueueMin <= 0) return created;
     const deliveryAt = calculatedDeliveryAt(order);
     if (deliveryAt == null) return created;
@@ -375,7 +442,7 @@
     if (!cfg || typeof cfg !== 'object') return;
     const enabled = cfg.enabled !== false;
     let sizesChanged = false;
-    if (Number.isFinite(cfg.avatarSize) && cfg.avatarSize >= 24 && cfg.avatarSize <= 80 && cfg.avatarSize !== state.avatarSize) {
+    if (Number.isFinite(cfg.avatarSize) && cfg.avatarSize >= 16 && cfg.avatarSize <= 80 && cfg.avatarSize !== state.avatarSize) {
       state.avatarSize = cfg.avatarSize; sizesChanged = true;
     }
     if (Number.isFinite(cfg.numberSize) && cfg.numberSize >= 12 && cfg.numberSize <= 48 && cfg.numberSize !== state.numberSize) {
@@ -450,7 +517,8 @@
     for (const { card, order } of items) {
       const kn = kitchenNumberFrom(order);
       if (kn) withNumber++;
-      if (!render(card, kn)) noAvatar++;
+      const ptStart = order.created_at ? statusStartTime(order) : NaN;
+      if (!render(card, kn, ptStart)) noAvatar++;
       const wrapper = card.closest(TABLE_ITEM_SELECTOR);
       applyStatusColor(card, order, !wrapper || coloredWrappers.has(wrapper));
     }
@@ -498,7 +566,8 @@
   setInterval(fetchConfig, CONFIG_POLL_MS);
   fetchPrepTime();
   setInterval(fetchPrepTime, PREP_TIME_POLL_MS);
+  setInterval(tickProductionTimers, 20000);   // minute-granularity display: no need to tick every second
   scheduleScan();
   if (state.debug) window.__mxpState = state;   // inspection hook, debug mode only
-  log('started', { version: SCRIPT_VERSION, path: location.pathname, liveOrders: onLiveOrdersPage() });3
+  log('started', { version: SCRIPT_VERSION, path: location.pathname, liveOrders: onLiveOrdersPage() });
 })();
