@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Maxipizza · GoPOS Live Orders
 // @namespace    https://maxipizza.pl/gopos-live-orders
-// @version      0.7.0
+// @version      0.7.2
 // @description  Pokazuje numer kuchenny zamówienia pod awatarem źródła na kartach Live Orders w GoPOS
 // @author       Maxipizza
 // @match        https://app.gopos.io/*
@@ -297,6 +297,7 @@
       if (card.dataset.mxpMode) { card.style.minHeight = ''; delete card.dataset.mxpMode; }
       clearStatusColor(card);
     });
+    observer.takeRecords();   // drain the mutations this just caused so they don't re-trigger us
   }
 
   // ------------------------------------------------------------------ order age status color
@@ -363,7 +364,7 @@
     if (!eligible || card.classList.contains('external')) { clearStatusColor(card); return; }
     const cls = statusClassFor(order);
     if (!cls) { clearStatusColor(card); return; }
-    if (card.dataset.mxpStatus === cls) return;   // idempotent: no flicker on every poll
+    if (card.dataset.mxpStatus === cls && card.classList.contains(cls)) return;   // idempotent: no flicker on every poll
     card.classList.remove(...STATUS_CLASSES);
     card.classList.add(cls);
     card.dataset.mxpStatus = cls;
@@ -467,25 +468,28 @@
     log('scan', { cards: items.length, withNumber, noAvatar });
   }
 
-  // Throttle, not debounce: GoPOS re-renders the time badges every second, so a trailing
-  // debounce that resets on every mutation could be starved. Here the first mutation of a
-  // burst arms a single 300 ms timer and later mutations do not touch it.
+  // Deferred trigger for non-mutation sources (popstate, the 15s safety net, config/prep-time
+  // refresh): a short throttle is harmless here since nothing is racing a paint.
   let timer = null;
   function scheduleScan() {
     if (timer) return;
-    timer = setTimeout(() => { timer = null; scan(); }, 300);
+    timer = setTimeout(() => { timer = null; scan(); observer.takeRecords(); }, 300);
   }
 
-  const observer = new MutationObserver((mutations) => {
-    // ignore our own writes
-    for (const m of mutations) {
-      const t = m.target;
-      if (t && t.closest && t.closest('[data-mxp]')) continue;
-      scheduleScan();
-      return;
-    }
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
+  // The MutationObserver callback itself must call scan() synchronously, NOT via scheduleScan's
+  // setTimeout. MutationObserver callbacks run as a microtask right after React's DOM commit but
+  // BEFORE the browser paints that frame. Reacting synchronously here means our corrective styling
+  // lands in the same frame as GoPOS's own change, so the "naked" intermediate state (the card
+  // briefly losing mxp-status-*/avatar/number styling when e.g. its elapsed-time counter ticks and
+  // React rewrites the card's class/style, or briefly remounts it) is never actually painted.
+  // Deferring via setTimeout, as scheduleScan does, guarantees at least one visible paint of that
+  // intermediate state, which is exactly the flicker this is fixing.
+  function reactToMutations() {
+    scan();
+    observer.takeRecords();   // drain the mutations scan() itself just caused, so they don't loop back
+  }
+  const observer = new MutationObserver(reactToMutations);
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style'] });
   // SPA navigation: React swaps views without a reload, which the observer above sees as DOM
   // mutations, so no history hooks are needed. popstate covers the browser back button as well.
   window.addEventListener('popstate', scheduleScan);
